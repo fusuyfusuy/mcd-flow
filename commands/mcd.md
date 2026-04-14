@@ -28,7 +28,16 @@ Run /mcd from the main project root.
 
 ### 1b. Detect mode
 Check for `.mcd/manifest.json` in the current project root:
-- **Not found** → Greenfield mode
+- **Not found** → Greenfield mode. If the repo already contains substantial source code under `src/` (or equivalent), surface a one-time nudge before continuing:
+  ```
+  This repo has existing source code but no .mcd/manifest.json.
+  Greenfield /mcd will create artifacts for this feature in isolation — it won't
+  reflect the rest of the system. To make the manifest a source of truth for the
+  whole project, run /mcd-import first, then return to /mcd.
+
+  Continue with greenfield anyway? [y/n]
+  ```
+  `n` → abort with instructions to run `/mcd-import`. `y` → proceed.
 - **Found** → Diff mode
 
 ### 1c. Reconcile registry (if registry exists)
@@ -197,6 +206,8 @@ Merge mcd/<slug> → main? [y/n]
 ## Individual Phase Re-runs
 
 When the user invokes `/mcd-discover`, `/mcd-plan`, `/mcd-skeleton`, `/mcd-audit`, `/mcd-fill`, or `/mcd-verify` directly:
+
+(Note: `/mcd-import` is a separate top-level command with its own flow — see `commands/mcd-import.md`. It is not a phase re-run and does not require an existing worktree.)
 
 1. `git rev-parse --is-inside-work-tree` — abort if not a git repo.
 2. Look for any `.worktrees/mcd-*` directory in the project root.

@@ -62,6 +62,15 @@ That single command runs the full pipeline. Individual phases can be re-run inde
 /mcd-verify
 ```
 
+**Retrofitting an existing project:**
+
+```
+/mcd-import              # auto-detect domain scope
+/mcd-import src/orders   # limit scope to one module
+```
+
+Reverse-engineers existing code into `.mcd/manifest.json`, `.mcd/statechart.mmd`, `.mcd/requirements.md`, and a `types/` library — making the manifest a whole-system source of truth. After import, every `/mcd "<new feature>"` runs in diff mode and extends the existing statechart additively. See the **Retrofitting** section below.
+
 ---
 
 ## Tutorial
@@ -314,6 +323,34 @@ Resume from Phase 4 (Fill)? [y/n]
 ```
 
 Approve to skip all completed phases and continue from where it left off.
+
+---
+
+### Retrofitting an existing project (`/mcd-import`)
+
+MCD-Flow's value compounds when the manifest is a **whole-system source of truth**, not a per-feature artifact. `/mcd-import` bootstraps this for existing codebases by extracting actors, entities, state transitions, and types directly from your source — no prompt required.
+
+```
+/mcd-import               # auto-detect and rank candidate scopes
+/mcd-import src/orders    # scope to a specific module
+```
+
+**What it does:**
+
+1. Creates an isolated worktree (`mcd/import`) — main branch is never touched until you approve the merge
+2. Ranks top-level source directories by likely relevance (domain logic ranks higher than HTTP/UI glue) and asks you to pick the scope
+3. Scans the scoped code for: entity definitions, status enums / `state` / `phase` fields, state-transitioning functions, error paths, and actors inferred from call sites
+4. Presents a full review summary (entities, inferred statechart, out-of-scope directories, ambiguity flags) **before writing any files**
+5. On approval, writes `.mcd/manifest.json` (with `"imported": true` and a `source_map` back to original files), `.mcd/statechart.mmd`, `.mcd/requirements.md`, `.mcd/config.json`, and — only where needed — type files that re-export existing definitions rather than duplicating them
+
+**Scope guidance:** Do not import the whole repo. The statechart is load-bearing and a synthetic state machine over CRUD/UI code creates false constraints. Scope to the **core domain** — the parts with real workflow state (orders, jobs, payments, agreements, subscriptions). Leaf CRUD and UI can stay outside the manifest; new features for those areas can use greenfield `/mcd` per-feature runs.
+
+**When the scope has no discoverable state machine,** the command will stop and recommend either narrowing scope or skipping import entirely. Better no manifest than a fake one.
+
+**After import:**
+
+- `/mcd "<new feature>"` automatically detects the imported manifest and runs in diff mode — additive extensions only, with breaking changes gated behind explicit confirmation
+- Re-run `/mcd-import` at any time by deleting `.mcd/` first (e.g. after a major refactor that invalidates the state model)
 
 ---
 
