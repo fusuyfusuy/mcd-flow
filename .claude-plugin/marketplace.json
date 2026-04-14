@@ -7,7 +7,7 @@
   "plugins": [
     {
       "name": "mcd-flow",
-      "source": ".",
+      "source": "./",
       "description": "Manifest-Contract-Dispatch pipeline for structured feature development. Generates spec, statechart, types, oracle tests, and fills implementation using model-routed sub-agents (Opus → Sonnet → Haiku).",
       "version": "0.1.0",
       "category": "development",
