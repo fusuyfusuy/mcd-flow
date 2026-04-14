@@ -1,5 +1,6 @@
 {
   "name": "mcd-flow",
+  "version": "0.2.0",
   "description": "MCD-Flow: Manifest-Contract-Dispatch pipeline for structured feature development. Generates spec, statechart, type definitions, oracle tests, and fills implementation using model-routed sub-agents.",
   "author": {
     "name": "Yusuf Akcakaya"
