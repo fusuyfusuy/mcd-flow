@@ -29,8 +29,20 @@ Six phases, each dispatched as a model-routed sub-agent:
 
 ## Installation
 
+From inside Claude Code:
+
+```
+/plugin marketplace add fusuyfusuy/mcd-flow
+/plugin install mcd-flow@mcd-flow
+```
+
+Or from a local clone:
+
 ```bash
-claude plugin install /path/to/mcd-flow
+git clone https://github.com/fusuyfusuy/mcd-flow
+```
+```
+/plugin install /path/to/mcd-flow
 ```
 
 ## Quick start
