@@ -5,39 +5,52 @@ description: MCD-Flow master orchestrator. Detects greenfield vs existing projec
 
 You are the **MCD-Flow orchestrator**. Execute the full pipeline for the given feature prompt.
 
+Read `${CLAUDE_PLUGIN_ROOT}/references/dispatch.md` **before issuing any sub-agent** — it specifies the exact `Agent` tool shape, model aliases, and registry-sharding rules you must follow. If `${CLAUDE_PLUGIN_ROOT}` is unset, walk upward from the plugin's command file location until a `.claude-plugin/plugin.json` is found and use that directory.
+
+---
+
+## Helpers (use these exact commands)
+
+- **ISO timestamp:** `date -u +"%Y-%m-%dT%H:%M:%SZ"`
+- **SHA-256 of file:** `sha256sum <path> | cut -d' ' -f1`
+- **Slugify** the feature prompt: lowercase, strip non-`[a-z0-9 -]` characters, collapse runs of whitespace to a single `-`, trim leading/trailing `-`, truncate to 50 chars. Example: `"User Auth: email+password!"` → `user-auth-emailpassword`.
+
 ---
 
 ## Step 1: Startup
 
-### 1a. Detect mode
+### 1a. Refuse to run from inside a worktree
+Run `git rev-parse --show-toplevel` and check if the path contains `/.worktrees/mcd-`. If so, abort:
+```
+Refusing to start a new MCD-Flow pipeline from inside an existing worktree.
+Run /mcd from the main project root.
+```
+
+### 1b. Detect mode
 Check for `.mcd/manifest.json` in the current project root:
 - **Not found** → Greenfield mode
 - **Found** → Diff mode
 
-### 1b. Reconcile registry (if registry exists)
-If `.mcd/registry.json` exists:
-- Hash the actual contents of all files tracked in `registry.json`
-- Compare against stored hashes
-- If any hash mismatches, surface to user:
-  ```
-  Registry drift detected in:
-    <file list>
-  These files were modified outside MCD-Flow. Continue anyway? [y/n]
-  ```
-  - **n** → abort
+### 1c. Reconcile registry (if registry exists)
+If `.mcd/registry.json` exists, hash every file listed under `files` and compare against stored `hash`. On mismatch, surface:
+```
+Registry drift detected in:
+  <file list>
+These files were modified outside MCD-Flow. Continue anyway? [y/n]
+```
+`n` → abort.
 
-### 1c. Slugify the feature name
-Derive a slug from the prompt: lowercase, spaces → hyphens, remove special chars.
-Example: `"user authentication system"` → `user-authentication-system`
+### 1d. Slugify the feature name
+Apply the slug rules above.
 
-### 1d. Create branch and worktree
+### 1e. Create branch and worktree
 ```bash
 git checkout -b mcd/<slug>
 git worktree add .worktrees/mcd-<slug> mcd/<slug>
 ```
 All subsequent file operations happen inside `.worktrees/mcd-<slug>/`.
 
-### 1e. Check for existing pipeline
+### 1f. Check for existing pipeline
 If `.worktrees/mcd-<slug>/` already exists:
 ```
 Found existing MCD-Flow pipeline for '<feature>'.
@@ -45,120 +58,89 @@ Last completed phase: <phase from registry.json>
 Resume from Phase <N+1>? [y/n]
 ```
 - **y** → skip completed phases, jump to next
-- **n** → confirm, delete worktree, start fresh
+- **n** → confirm with a second prompt `Delete worktree and start fresh? [y/n]` before `git worktree remove --force`
 
 ---
 
 ## Step 2: Phase Dispatch
 
-Dispatch each phase as a sub-agent using the Agent tool with an explicit `model` parameter. Wait for each to complete before dispatching the next. Pass the worktree path and feature prompt in every agent prompt.
+For each phase below, follow the recipe in `references/dispatch.md`:
 
-### Phase 0 — Discover (Opus)
-```
-Agent(
-  model: "claude-opus-4-6",
-  skill: "mcd-discover",
-  prompt: "Worktree: .worktrees/mcd-<slug>/\nFeature prompt: <original prompt>"
-)
-```
-→ **GATE:** Wait for user approval before continuing.
+1. Read `${CLAUDE_PLUGIN_ROOT}/commands/<phase>.md`, strip frontmatter.
+2. Compose the sub-agent prompt: phase body + `## Execution context` block with worktree, feature slug, mode, config path.
+3. Call `Agent(description, subagent_type="general-purpose", model=<alias>, prompt=<composed>)`.
+4. Wait for return, inspect the written artifacts, run the gate (if any).
 
-### Phase 1 — Plan (Opus)
-```
-Agent(
-  model: "claude-opus-4-6",
-  skill: "mcd-plan",
-  prompt: "Worktree: .worktrees/mcd-<slug>/\nMode: <greenfield|diff>\nFeature prompt: <original prompt>"
-)
-```
-→ **GATE:** Wait for user approval before continuing.
+### Phase 0 — Discover (`model: "opus"`)
+→ **GATE:** Requirements approval. See mcd-discover.md.
 
-### Phase 2 — Skeleton (Sonnet)
-```
-Agent(
-  model: "claude-sonnet-4-6",
-  skill: "mcd-skeleton",
-  prompt: "Worktree: .worktrees/mcd-<slug>/"
-)
-```
+### Phase 1 — Plan (`model: "opus"`)
+Pass `Mode: <greenfield|diff>` in the context block.
+→ **GATE:** Spec approval. See mcd-plan.md. After this gate, `.mcd/config.json` must exist.
 
-### Phase 3 — Audit (Opus)
-```
-Agent(
-  model: "claude-opus-4-6",
-  skill: "mcd-audit",
-  prompt: "Worktree: .worktrees/mcd-<slug>/"
-)
-```
-→ **GATE:** Wait for user approval before continuing.
+### Phase 2 — Skeleton (`model: "sonnet"`)
+→ **GATE:** Skeleton approval (**default on, with optional override**). See `mcd-skeleton.md`. The gate can be skipped by:
+- The user passing `--no-skeleton-gate` on the `/mcd` invocation, OR
+- The presence of `"skip_skeleton_gate": true` in `.mcd/config.json`
 
-### Phase 4 — Fill (Haiku, DAG-ordered with concurrency)
+When skipping, print: `Phase 2 gate bypassed (per user override)` and continue.
 
-Read `.mcd/registry.json` from the worktree. Get all files with status `"skeleton"`.
+### Phase 3 — Audit (`model: "opus"`)
+→ **GATE:** Audited-skeleton approval. See `mcd-audit.md`.
 
-**Build a dependency DAG:**
+### Phase 4 — Fill (`model: "haiku"`, DAG-ordered with concurrency)
 
-1. For each skeleton file, parse its `import` statements to identify which other skeleton files it depends on.
-2. Produce a topological sort (leaf nodes — files imported by others but importing nothing from the set — come first).
-3. Group the sorted files into **levels**: all files at the same level have no intra-level dependencies and can be filled concurrently.
+Read `.mcd/registry.json`. Get all files with status `"skeleton"`.
+
+**Build the dependency DAG:**
+
+1. For each skeleton file, detect imports/dependencies according to the language profile (`.mcd/config.json`):
+   - `typescript`: parse `import ... from '...'` / `require('...')` statements
+   - `python`: parse `from X import Y` and `import X` statements
+   - `go`: parse `import (...)` blocks
+2. Resolve each import to a skeleton file in the registry (skip external imports).
+3. Topologically sort. **If a cycle is detected**, group the cyclic SCC as a single DAG node and fill those files concurrently with each other's skeletons included as context.
+4. Group sorted files into **levels** — all files at one level have no intra-level dependencies.
 
 **Dispatch by level:**
+For each level, emit **one tool-call turn** containing N `Agent` calls — one per file — using `model: "haiku"`. The harness runs them in parallel. Each file's prompt includes:
+- the skeleton file content
+- only the types referenced in that file's CONTRACT blocks (parse `Input:`/`Output:` lines to extract type names and source files)
+- the relevant transitions from `manifest.statechart.transitions` for that file's actions
+- the shard path to write: `.mcd/registry/<slug-of-file-path>.json` (prevents concurrent write collisions)
+
+Wait for ALL agents to complete, then **merge registry shards**:
 ```
-For each level in the DAG (lowest level first):
-  Dispatch ALL files in this level concurrently:
-    Agent(
-      model: "claude-haiku-4-5-20251001",
-      skill: "mcd-fill",
-      prompt: "Worktree: .worktrees/mcd-<slug>/\nFile: <file-path>\n\n<skeleton file content>\n\nTypes:\n<content of types referenced in this file's CONTRACT blocks only>\n\nRelevant transitions:\n<transitions for this file from manifest.statechart.transitions>"
-    )
-  Wait for ALL agents in this level to complete before dispatching the next level.
+For each file in .mcd/registry/*.json:
+  Read shard, merge into .mcd/registry.json under files[<file-path>]
+  Delete shard
 ```
 
-**Example:** If `db.ts` is imported by both `orderService.ts` and `inventoryService.ts`, which are in turn imported by `fulfillmentService.ts`:
-- Level 0 (fill concurrently): `db.ts`
-- Level 1 (fill concurrently): `orderService.ts`, `inventoryService.ts`
-- Level 2 (fill concurrently): `fulfillmentService.ts`
-
-**Context injection rule:** Do not inject all `types/` files. Parse the `// CONTRACT: Input:` and `// CONTRACT: Output:` lines in the skeleton file, extract the referenced type names and their source files, and inject only those files.
+Proceed to next level only after the merge.
 
 ### Phase 5 — Verify + Correction Loop
 
-`mcd-verify` is a pure checker. It runs lint/type-check/tests and returns a structured report. The orchestrator owns all retry and escalation logic.
+`mcd-verify` is a pure checker. It runs lint/typecheck/test per file (using commands from `.mcd/config.json`) and returns a structured report. The orchestrator owns all retry and escalation.
 
-#### Step 5a: Initial verification
-```
-Agent(
-  model: "claude-haiku-4-5-20251001",
-  skill: "mcd-verify",
-  prompt: "Worktree: .worktrees/mcd-<slug>/"
-)
-```
+**Step 5a — Initial verification:** Dispatch `mcd-verify` with `model: "haiku"`, no file scope (verifies all filled files).
 
-Read the report. For each file with status `"failed"`:
+**Step 5b — Correction loop, per failed file:**
 
-#### Step 5b: Correction loop (per failed file)
+*Attempts 1–2 — Haiku self-correction:*
+Re-dispatch `mcd-fill` with `model: "haiku"` and an added block in the prompt:
+```
+CORRECTION ATTEMPT <N>:
+Error output:
+<full error log from verify>
 
-**Attempts 1–2 — Haiku self-correction:**
-```
-Agent(
-  model: "claude-haiku-4-5-20251001",
-  skill: "mcd-fill",
-  prompt: "Worktree: .worktrees/mcd-<slug>/\nFile: <file-path>\n\n<skeleton content>\n\nTypes:\n<relevant types>\n\nRelevant transitions:\n<transitions>\n\nCORRECTION ATTEMPT <N>:\nError output:\n<full error log from verify>\n\nPrevious attempt code:\n<full file content>\n\nFix the errors while strictly following the CONTRACT pseudocode. Do not change function signatures."
-)
-```
-After each correction, re-run mcd-verify scoped to that file only:
-```
-Agent(
-  model: "claude-haiku-4-5-20251001",
-  skill: "mcd-verify",
-  prompt: "Worktree: .worktrees/mcd-<slug>/\nFile: <file-path>"
-)
-```
-If it passes → continue to next failed file.
+Previous attempt code:
+<full file content>
 
-**Attempt 3 — Pause and surface to user:**
+Fix the errors while strictly following the CONTRACT pseudocode. Do not change function signatures.
+```
+Re-run `mcd-verify` scoped to that file only. On pass → continue to next failed file.
 
-Do NOT attempt another self-correction. Show:
+*Attempt 3 — Pause and surface:*
 ```
 === MCD-Flow: Verification Failed ===
 File: <file-path>
@@ -171,31 +153,27 @@ Diff (attempt 1 → attempt 3):
 <diff>
 ```
 
-Ask: **"Retry this file with Sonnet (claude-sonnet-4-6)? [y/n/skip]"**
-
-- **y** → re-dispatch fill with `claude-sonnet-4-6`, re-verify
-  - If Sonnet fails → ask: **"Escalate to Opus (claude-opus-4-6)? [y/n/skip]"**
-    - **y** → re-dispatch with `claude-opus-4-6`, re-verify
-    - **n / skip** → mark `"skipped"` in registry, continue
-- **n** → ask: **"Skip this file or abort the pipeline? [skip/abort]"**
-  - **skip** → mark `"skipped"`, continue
-  - **abort** → stop pipeline, print summary
-- **skip** → mark `"skipped"`, continue
+Ask: **"Retry with Sonnet? [y/n/skip]"**
+- `y` → re-dispatch `mcd-fill` with `model: "sonnet"`, re-verify
+  - Sonnet fails → `Escalate to Opus? [y/n/skip]`; `y` retries with `model: "opus"`, `n`/`skip` marks `"skipped"` in registry
+- `n` → `Skip this file or abort the pipeline? [skip/abort]`
+- `skip` → mark `"skipped"`, continue
 
 ---
 
 ## Step 3: Completion Gate
 
-When Phase 5 exits cleanly, print:
+When Phase 5 exits cleanly:
 ```
 === MCD-Flow Pipeline Complete ===
 Branch:   mcd/<slug>
 Worktree: .worktrees/mcd-<slug>/
+Verified: <n>  Skipped: <n>
 
-All tests pass. Merge mcd/<slug> → main? [y/n]
+Merge mcd/<slug> → main? [y/n]
 ```
 
-- **y** →
+- **y:**
   ```bash
   git checkout main
   git merge mcd/<slug> --no-ff -m "feat: <feature name> (MCD-Flow)"
@@ -204,21 +182,24 @@ All tests pass. Merge mcd/<slug> → main? [y/n]
   ```
   Print: `Merged and cleaned up.`
 
-- **n** →
+- **n:**
   ```
   Branch preserved: mcd/<slug>
   Worktree preserved: .worktrees/mcd-<slug>/
-  To open a PR: gh pr create --head mcd/<slug>
+  To open a PR:
+    gh pr create --head mcd/<slug> \
+      --title "feat: <feature name>" \
+      --body "Generated by MCD-Flow. See .mcd/requirements.md and .mcd/statechart.mmd."
   ```
 
 ---
 
 ## Individual Phase Re-runs
 
-When invoked directly as `/mcd-discover`, `/mcd-plan`, `/mcd-skeleton`, `/mcd-audit`, `/mcd-fill`, or `/mcd-verify`:
+When the user invokes `/mcd-discover`, `/mcd-plan`, `/mcd-skeleton`, `/mcd-audit`, `/mcd-fill`, or `/mcd-verify` directly:
 
-1. Verify this is a git repository (`git rev-parse --is-inside-work-tree`). If not → print error and abort.
-2. Check `.worktrees/` for any `mcd-*` directory.
-3. If found → run the phase inside that worktree.
-4. If none found → create a new worktree: `mcd/adhoc-<timestamp>`.
-5. Dispatch the appropriate sub-agent with model and worktree path.
+1. `git rev-parse --is-inside-work-tree` — abort if not a git repo.
+2. Look for any `.worktrees/mcd-*` directory in the project root.
+3. Found → run that phase inside it. Multiple found → prompt user to pick one.
+4. None → create `.worktrees/mcd-adhoc-<timestamp>/` on a fresh `mcd/adhoc-<timestamp>` branch.
+5. Dispatch the phase sub-agent per `references/dispatch.md`.

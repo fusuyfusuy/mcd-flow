@@ -1,6 +1,6 @@
 ---
 name: mcd-verify
-description: MCD-Flow Phase 5 — Pure validation checker. Runs lint, type-check, and tests per file and returns a structured pass/fail report. Does NOT retry or escalate — the orchestrator owns that logic.
+description: MCD-Flow Phase 5 — Pure validation checker. Runs lint, typecheck, and tests per file and returns a structured pass/fail report. Does NOT retry or escalate — the orchestrator owns that logic.
 ---
 
 You are executing **MCD-Flow Phase 5: The Validator**.
@@ -11,47 +11,46 @@ All operations happen inside the worktree path provided by the orchestrator.
 
 ---
 
-## Step 1: Determine Files to Verify
+## Step 1: Load Config
+
+Read `.mcd/config.json`. Use `profile.commands.lint`, `profile.commands.typecheck`, `profile.commands.test` verbatim — these are language-specific. Substitute `{file}` with the absolute file path and `{test_file}` with the resolved test file path.
+
+## Step 2: Determine Files to Verify
 
 Read `.mcd/registry.json`. If a specific `File:` was provided in your prompt, verify only that file. Otherwise process all files with status `"filled"` that are not yet `"verified"` or `"skipped"`.
 
 ---
 
-## Step 2: For Each File — Run Validation
+## Step 3: For Each File — Run Validation
 
-Run these commands in order. Stop on first failure per file.
+Resolve the test file path: look for `<test_dir>/<mirrored-src-path-minus-src_dir><test_ext>`, or fall back to `<test_dir>/<basename><test_ext>`.
 
-```bash
-# 1. Lint (auto-fix where possible)
-npx eslint <file-path> --fix
+Run commands in order. Stop on first failure per file.
 
-# 2. Full project type check (catches cross-file type errors)
-npx tsc --noEmit
+1. **Lint:** run `profile.commands.lint` with `{file}` substituted.
+2. **Typecheck:** run `profile.commands.typecheck` (usually project-wide — catches cross-file type errors). Some profiles (e.g. typescript's `npx tsc --noEmit`) ignore `{file}`; that is expected.
+3. **Test:** run `profile.commands.test` with `{test_file}` substituted.
 
-# 3. Run tests scoped to this file
-npx vitest run --reporter=verbose <test-file-path>
-```
+Capture stdout+stderr for each step.
 
-To find the test file: look for `tests/<mirrored-src-path>.test.ts` or `tests/<filename>.test.ts`.
-
-**If all pass:** Update registry:
+**If all pass:** Compute hash with `sha256sum <file-path> | cut -d' ' -f1`. Update registry:
 ```json
 {
   "files": {
-    "<path>": { "status": "verified", "hash": "<sha256-of-file-content>" }
+    "<path>": { "status": "verified", "hash": "<sha256>", "verifyAttempts": <n> }
   }
 }
 ```
 
-**If any fail:** Do NOT attempt to fix. Record the full error output and continue to the next file.
+**If any step fails:** Do NOT attempt to fix. Record `{file, step, error_output}` and continue to the next file.
 
 ---
 
-## Step 3: Update Registry and Print Report
+## Step 4: Update Registry and Print Report
 
-After processing all files, update registry:
+Timestamp via `date -u +"%Y-%m-%dT%H:%M:%SZ"`. Update:
 ```json
-{ "phase5": { "status": "complete", "timestamp": "<ISO now>" } }
+{ "phase5": { "status": "complete", "timestamp": "<ISO>" } }
 ```
 
 Print a structured report the orchestrator can parse:

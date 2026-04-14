@@ -1,6 +1,6 @@
 ---
 name: mcd-plan
-description: MCD-Flow Phase 1 — Generate SPEC_MANIFEST, statechart (.mmd), and type definitions. Dispatched by /mcd orchestrator with model claude-opus-4-6.
+description: MCD-Flow Phase 1 — Detect language, generate SPEC_MANIFEST, statechart (.mmd), and type definitions. Dispatched by /mcd orchestrator with model opus.
 ---
 
 You are executing **MCD-Flow Phase 1: The Architect**.
@@ -15,11 +15,35 @@ All file operations happen inside the worktree path provided by the orchestrator
 
 ---
 
-## Step 1: Detect Mode
+## Step 1: Detect Language & Write Config
+
+Read `${CLAUDE_PLUGIN_ROOT}/references/language-profiles.md` to see the built-in profiles and detection rules.
+
+Detect the language from markers in the project root (the directory containing the worktree, not the worktree itself — look at the parent repo):
+
+| Marker | Profile |
+|--------|---------|
+| `package.json` | typescript |
+| `pyproject.toml` or `requirements.txt` | python |
+| `go.mod` | go |
+| none | **prompt the user** to pick one of the built-in profiles, or describe a custom profile |
+
+If a marker exists but the project's actual toolchain differs (e.g. a Python project using `unittest` rather than `pytest`), ask the user:
+```
+Detected marker: <marker>
+Inferred profile: <language>
+Is this correct, or override? [keep / override]
+```
+
+Write the chosen profile to `<worktree>/.mcd/config.json` using the exact schema from `references/language-profiles.md`. All later phases rely on this file.
+
+---
+
+## Step 2: Detect Mode
 
 Check if `.mcd/manifest.json` exists in the worktree:
-- **Not found** → Greenfield mode: generate everything from scratch using the feature prompt and requirements.
-- **Found** → Diff mode: read existing manifest + scan `src/`, `types/`, `tests/` for current state. Apply the rules below.
+- **Not found** → Greenfield mode: generate everything from scratch.
+- **Found** → Diff mode: read existing manifest + scan `<src_dir>`, `<types_dir>`, `<test_dir>` (from config) for current state. Apply the rules below.
 
 ### Diff Mode Rules
 
@@ -30,19 +54,17 @@ Check if `.mcd/manifest.json` exists in the worktree:
 | New entity | Add to `entities[]`, add new type file, add new tests |
 | New feature / flow | Append to `features[]` and `flows[]`, extend statechart |
 | New statechart state or transition | Add alongside existing; do not reorder or rename existing states |
-| Modify existing entity field | Require explicit user confirmation before changing a type that is already referenced in skeleton/filled files |
+| Modify existing entity field | Require explicit user confirmation before changing a type already referenced in skeleton/filled files |
 | Remove entity, field, or transition | Treat as breaking. Stop and confirm with user before proceeding |
 | Rename anything | Treat as breaking. Stop and confirm with user before proceeding |
 
-**Version bump:** Increment patch (`1.0.x`) for additive-only changes. Increment minor (`1.x.0`) if any existing type file is modified.
+**Version bump:** Increment patch (`1.0.x`) for additive-only. Increment minor (`1.x.0`) if any existing type file is modified.
 
 **Do not regenerate** tests or skeletons for transitions that already exist and are unchanged.
 
 ---
 
-## Step 2: Generate `.mcd/manifest.json`
-
-Write the manifest with these fields:
+## Step 3: Generate `.mcd/manifest.json`
 
 ```json
 {
@@ -60,21 +82,21 @@ Write the manifest with these fields:
 ```
 
 **Rules:**
-- `version`: `"1.0.0"` for greenfield, increment patch for diffs
+- `version`: `"1.0.0"` greenfield; increment patch on diffs
 - `entities`: every domain object — fields with name + type, relations with entity + cardinality
-- `features`: each distinct capability with user flows listed as steps
+- `features`: each capability
 - `flows`: step-by-step sequences for each feature
-- `dependencies`: external packages needed (name → semver range)
-- `statechart_file`: always `.mcd/statechart.mmd` — points to the Mermaid source file written in Step 2b
-- Do not guess at implementation details — choose the simpler interpretation when ambiguous. Ambiguities should have already been resolved in `requirements.md` (Phase 0) — if a constraint is listed there, honour it exactly.
+- `dependencies`: external packages needed (name → version range) — use ecosystem-native format from `.mcd/config.json.language`
+- `statechart_file`: always `.mcd/statechart.mmd`
+- Do not guess implementation details — choose the simpler interpretation when ambiguous. Ambiguities should already be resolved in `requirements.md`.
 
 ---
 
-## Step 2b: Generate Statechart
+## Step 4: Generate Statechart
 
-Generate the `statechart` field inside `manifest.json` **and** write `.mcd/statechart.mmd` as a standalone Mermaid state diagram. The `.mmd` file is the human-readable, diffable source of truth; the JSON `statechart` field is the machine-readable index used by later phases.
+Write the statechart both as a human-readable `.mmd` (Mermaid) file and as the machine-readable `statechart` field inside the manifest.
 
-**Write `.mcd/statechart.mmd`:**
+**`.mcd/statechart.mmd`:**
 ```
 stateDiagram-v2
   [*] --> idle
@@ -90,24 +112,23 @@ stateDiagram-v2
   complete --> [*]
 ```
 
-Rules for the `.mmd` file:
+Rules:
 - Use `stateDiagram-v2`
 - Label every transition with `EVENT / actionName`
 - Use `after Nms` for timeout transitions
 - Every error state must appear explicitly
 
-**Generate the `statechart` field inside `manifest.json`.** This is the complete behavioral lifecycle of every feature.
+**`statechart` field inside `manifest.json`:**
 
-**Required for every statechart:**
-- `initial`: the starting state name
+Required:
+- `initial`: starting state name
 - `states`: every state, including all `error.*` substates and at least one `{ "type": "final" }` state
-- Every non-final state must have at least one outgoing transition
-- Every state involving a network/IO operation must have an `after` timeout entry
-- `transitions`: one object per event, each with `from`, `event`, `to`, `action`, `input` type name, `output` type name
+- Every non-final state has at least one outgoing transition
+- Every state involving a network/IO operation has an `after` timeout entry
+- `transitions`: one object per event — `from`, `event`, `to`, `action`, `input` type name, `output` type name
 
-**Error states are mandatory.** For every happy-path transition, define the corresponding error state and its handler action.
+**Error states are mandatory.** For every happy-path transition, define the corresponding error state and handler action.
 
-Example statechart structure:
 ```json
 {
   "initial": "idle",
@@ -140,20 +161,22 @@ Example statechart structure:
 }
 ```
 
-Every `transitions[].action` name becomes an exported function in the skeleton (Phase 2).
+Every `transitions[].action` becomes an exported function in the skeleton (Phase 2).
 
 ---
 
-## Step 3: Generate Type Files
+## Step 5: Generate Type Files
 
-Create files in `types/` — one file per domain entity or concern.
+Create files in `<types_dir>` (from `.mcd/config.json`) — one per domain entity or concern. Use `<file_ext>` for filenames.
 
 **Rules:**
-- Interfaces and Zod schemas only. No logic, no functions.
+- Type definitions + validation schemas only. No logic, no functions.
 - Every type referenced in a `transitions[].input` or `transitions[].output` must be exported here.
-- Use Zod for runtime validation, TypeScript interfaces for static types.
+- Use the `validation_lib` idiom from `.mcd/config.json`.
 
-Example:
+**Per-language examples:**
+
+*typescript (`validation_lib: zod`):*
 ```typescript
 import { z } from 'zod'
 
@@ -163,30 +186,60 @@ export const UserSchema = z.object({
   passwordHash: z.string(),
   createdAt: z.date(),
 })
-
 export type User = z.infer<typeof UserSchema>
 ```
 
+*python (`validation_lib: pydantic`):*
+```python
+from datetime import datetime
+from pydantic import BaseModel, EmailStr
+from uuid import UUID
+
+class User(BaseModel):
+    id: UUID
+    email: EmailStr
+    password_hash: str
+    created_at: datetime
+```
+
+*go (`validation_lib: go-playground/validator`):*
+```go
+package types
+
+import "time"
+
+type User struct {
+    ID           string    `json:"id" validate:"required,uuid"`
+    Email        string    `json:"email" validate:"required,email"`
+    PasswordHash string    `json:"password_hash" validate:"required"`
+    CreatedAt    time.Time `json:"created_at"`
+}
+```
+
+For other `validation_lib` values (custom profile), apply the same discipline: express types + runtime validation in idiomatic form, no business logic.
+
 ---
 
-## Step 4: Update `.mcd/registry.json`
+## Step 6: Update `.mcd/registry.json`
 
-Write or update the registry:
+Timestamp via `date -u +"%Y-%m-%dT%H:%M:%SZ"`:
+
 ```json
 {
-  "phase1": { "status": "complete", "timestamp": "<ISO now>" },
+  "phase1": { "status": "complete", "timestamp": "<ISO>" },
   "files": {}
 }
 ```
 
 ---
 
-## Step 5: Gate — Spec Approval
+## Step 7: Gate — Spec Approval
 
 Print a structured summary:
 ```
 === MCD-Flow Phase 1 Complete ===
 Feature: <name>
+Language: <typescript|python|go|...>
 Entities: <count> — <list>
 Features: <count> — <list>
 Statechart states: <count> — <list including error states>
@@ -200,7 +253,7 @@ Type files: <list>
 Note: Oracle tests are generated in Phase 3 (Audit) after the skeleton exists.
 ```
 
-Then ask: **"Approve spec to continue to Phase 2 (skeleton)? [y/n]"**
+Ask: **"Approve spec to continue to Phase 2 (skeleton)? [y/n]"**
 
 - **y** → exit cleanly (orchestrator proceeds to Phase 2)
 - **n** → ask what to change, revise manifest/statechart.mmd/types, re-show summary, ask again

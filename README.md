@@ -57,8 +57,12 @@ That single command runs the full pipeline. Individual phases can be re-run inde
 ### Prerequisites
 
 - Claude Code with the mcd-flow plugin installed
-- A TypeScript project with a `package.json` (Vitest and Zod will be added to dependencies by the pipeline)
-- Git initialized (`git init` if starting fresh)
+- A git repository (`git init` if starting fresh)
+- A language toolchain installed for the project you're working in
+
+MCD-Flow is tech-stack agnostic. Phase 1 detects the language from a project marker and writes `.mcd/config.json` declaring the source layout, stub syntax, validation library, test framework, and verification commands. Built-in profiles: **TypeScript** (`package.json` → zod + vitest), **Python** (`pyproject.toml` / `requirements.txt` → pydantic + pytest), **Go** (`go.mod` → validator + `go test`). See `references/language-profiles.md` to add more — no code changes required.
+
+The tutorial below walks through a TypeScript example; the Python and Go flows produce analogous artifacts with their own idioms.
 
 ---
 
@@ -143,9 +147,9 @@ The `.mcd/statechart.mmd` file is a standard Mermaid diagram — open it in any 
 
 ---
 
-### Step 4: Phase 2 — Skeleton (automatic)
+### Step 4: Phase 2 — Skeleton (approve the file tree, or override)
 
-No gate. Sonnet reads the manifest and builds the file tree with CONTRACT pseudocode stubs:
+Sonnet reads the manifest and builds the file tree with CONTRACT pseudocode stubs. A gate pauses after generation so you can confirm the structure is right before the more expensive Audit phase runs. Skip the gate with `--no-skeleton-gate` on `/mcd`, or by setting `"skip_skeleton_gate": true` in `.mcd/config.json`:
 
 ```typescript
 // src/services/orderService.ts
@@ -235,7 +239,7 @@ The Filler follows the CONTRACT pseudocode exactly. It cannot change function si
 
 ### Step 7: Phase 5 — Verify (automatic, with escalation)
 
-No gate. Haiku runs lint, `tsc --noEmit`, and Vitest per file, then the orchestrator handles failures:
+No gate. Haiku runs the `lint`, `typecheck`, and `test` commands declared in `.mcd/config.json` per file, then the orchestrator handles failures:
 
 ```
 === MCD-Flow Phase 5 Report ===

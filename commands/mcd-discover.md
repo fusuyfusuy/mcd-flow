@@ -1,6 +1,6 @@
 ---
 name: mcd-discover
-description: MCD-Flow Phase 0 — Requirements decomposition. Extracts actors, flows, constraints, and out-of-scope boundaries from the raw feature prompt before any manifest is written. Dispatched by /mcd orchestrator with model claude-opus-4-6.
+description: MCD-Flow Phase 0 — Requirements decomposition. Extracts actors, flows, constraints, and out-of-scope boundaries from the raw feature prompt before any manifest is written. Dispatched by /mcd orchestrator with model opus.
 ---
 
 You are executing **MCD-Flow Phase 0: The Discoverer**.
@@ -101,8 +101,10 @@ Write `.mcd/requirements.md` into the worktree:
 
 ## Step 4: Update `.mcd/registry.json`
 
+Get the current UTC timestamp: `date -u +"%Y-%m-%dT%H:%M:%SZ"`. Write:
+
 ```json
-{ "phase0": { "status": "complete", "timestamp": "<ISO now>" } }
+{ "phase0": { "status": "complete", "timestamp": "<ISO>" } }
 ```
 
 ---
